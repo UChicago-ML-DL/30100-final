@@ -22,7 +22,7 @@ from accelerate import Accelerator
 
 MAX_LENGTH = 3072
 SEED = 42
-HF_TOKEN = os.environ["HF_TOKEN"]
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
 
 # ------------------------------
@@ -103,9 +103,9 @@ def setup_model_and_tokenizer(model_name, bnb_config, accelerator):
 
     # Setup LoRA configuration for QLoRA training
     lora_config = LoraConfig(
-        r=16,
-        lora_alpha=64,
-        lora_dropout=0.1,
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.05,
         bias="none",
         target_modules=[
             "down_proj",
@@ -147,6 +147,7 @@ def evaluate(model, dataloader, device):
 
     accuracy = correct / total
     avg_val_loss = total_val_loss / len(dataloader)
+    model.train()
     return avg_val_loss, accuracy
 
 
@@ -160,6 +161,7 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
+        running_loss = 0
 
         for step, batch in enumerate(tqdm(train_dataloader)):
             optimizer.zero_grad()
@@ -172,6 +174,7 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
+            running_loss += loss.item()
 
             accelerator.backward(loss)
             optimizer.step()
@@ -183,8 +186,9 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
             # Log training loss every log_steps steps
             if (step + 1) % log_steps == 0:
                 print(
-                    f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
-                writer.add_scalar("Train/Step_Loss", loss.item(), global_step)
+                    f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {running_loss:.4f}")
+                writer.add_scalar("Train/Step_Loss", running_loss, global_step)
+                running_loss = 0
 
             # Evaluate and save best model every eval_steps steps
             if global_step % eval_steps == 0:
@@ -242,7 +246,7 @@ def main():
         model, optimizer, train_dataloader)
 
     # Calculate total training steps and setup the linear scheduler with warmup
-    num_epochs = 3
+    num_epochs = 4
     total_training_steps = num_epochs * len(train_dataloader)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -263,7 +267,7 @@ def main():
                accelerator,
                writer,
                num_epochs=num_epochs,
-               log_steps=10,
+               log_steps=50,
                eval_steps=500)
 
     writer.close()
