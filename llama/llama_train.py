@@ -1,3 +1,4 @@
+import os
 import json
 
 from tqdm import tqdm
@@ -7,8 +8,8 @@ from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import (
-    AutoModelForSequenceClassification, 
-    AutoTokenizer, 
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
     BitsAndBytesConfig,
     get_linear_schedule_with_warmup
 )
@@ -21,6 +22,7 @@ from accelerate import Accelerator
 
 MAX_LENGTH = 3072
 SEED = 42
+HF_TOKEN = os.environ["HF_TOKEN"]
 
 
 # ------------------------------
@@ -45,7 +47,8 @@ class TextClassificationDataset(Dataset):
 def create_collate_fn(tokenizer):
     def collate_fn(batch):
         texts = [item["text"] for item in batch]
-        labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
+        labels = torch.tensor([item["label"]
+                              for item in batch], dtype=torch.long)
         tokenized = tokenizer(
             texts,
             padding=True,  # Enable dynamic padding
@@ -63,11 +66,14 @@ def create_collate_fn(tokenizer):
 
 def load_datasets(df_path, label_map, tokenizer):
     df = pd.read_csv(df_path)
-    train_dataset = TextClassificationDataset(df[df["split"] == "train"], label_map, tokenizer)
+    train_dataset = TextClassificationDataset(
+        df[df["split"] == "train"], label_map, tokenizer)
     val_df = df[df["split"] == "valid"].sample(1024, random_state=SEED)
     val_dataset = TextClassificationDataset(val_df, label_map, tokenizer)
-    train_dataloader = DataLoader(train_dataset, batch_size=2, collate_fn=create_collate_fn(tokenizer))
-    val_dataloader = DataLoader(val_dataset, batch_size=8, collate_fn=create_collate_fn(tokenizer))
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=2, collate_fn=create_collate_fn(tokenizer))
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=8, collate_fn=create_collate_fn(tokenizer))
     return train_dataloader, val_dataloader
 
 
@@ -76,34 +82,44 @@ def load_datasets(df_path, label_map, tokenizer):
 # ------------------------------
 def setup_model_and_tokenizer(model_name, bnb_config, accelerator):
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
     # Load model with quantization config and task-specific number of labels
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name, quantization_config=bnb_config, num_labels=3,
-        device_map={"": accelerator.process_index}
+        device_map={"": accelerator.process_index},
+        token=HF_TOKEN
     )
     # Set pad token and resize embeddings
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     model.config.pad_token_id = tokenizer.pad_token_id
     model.resize_token_embeddings(len(tokenizer))
-    
+
     # Prepare model for efficient training
     model.gradient_checkpointing_enable()
     model = prepare_model_for_kbit_training(model)
-    
+
     # Save tokenizer for later use
-    tokenizer.save_pretrained("tokenizer")
-    
+    tokenizer.save_pretrained("best_model")
+
     # Setup LoRA configuration for QLoRA training
     lora_config = LoraConfig(
-        r=8, 
-        lora_alpha=32, 
-        lora_dropout=0.05,
+        r=16,
+        lora_alpha=64,
+        lora_dropout=0.1,
         bias="none",
+        target_modules=[
+            "down_proj",
+            "o_proj",
+            "q_proj",
+            "k_proj",
+            "gate_proj",
+            "up_proj",
+            "v_proj"
+        ],
         task_type="SEQ_CLS"
     )
     model = get_peft_model(model, lora_config)
-    
+
     return model, tokenizer
 
 
@@ -113,16 +129,23 @@ def setup_model_and_tokenizer(model_name, bnb_config, accelerator):
 def evaluate(model, dataloader, device):
     model.eval()
     total_val_loss = 0
+    correct = 0
+    total = 0
     with torch.no_grad():
         for batch in tqdm(dataloader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask, labels=labels)
             total_val_loss += outputs.loss.item()
             preds = outputs.logits.argmax(dim=1)
 
-    accuracy = (preds == labels).float().mean().item()
+            correct += (preds == labels).sum().item()
+            total += len(labels)
+
+    accuracy = correct / total
     avg_val_loss = total_val_loss / len(dataloader)
     return avg_val_loss, accuracy
 
@@ -146,7 +169,8 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
 
             accelerator.backward(loss)
@@ -158,13 +182,16 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
 
             # Log training loss every log_steps steps
             if (step + 1) % log_steps == 0:
-                print(f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
+                print(
+                    f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
                 writer.add_scalar("Train/Step_Loss", loss.item(), global_step)
 
             # Evaluate and save best model every eval_steps steps
             if global_step % eval_steps == 0:
-                avg_val_loss, accuracy = evaluate(model, val_dataloader, device)
-                print(f"Step {global_step} Validation Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.4f}")
+                avg_val_loss, accuracy = evaluate(
+                    model, val_dataloader, device)
+                print(
+                    f"Step {global_step} Validation Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.4f}")
                 writer.add_scalar("Validation/Loss", avg_val_loss, global_step)
                 writer.add_scalar("Validation/Accuracy", accuracy, global_step)
                 if avg_val_loss < best_val_loss:
@@ -173,7 +200,8 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
                     unwrapped_model = accelerator.unwrap_model(model)
                     unwrapped_model.save_pretrained("best_model")
                     torch.cuda.empty_cache()
-                    print(f"Best model saved at step {global_step} with Validation Loss: {best_val_loss:.4f}")
+                    print(
+                        f"Best model saved at step {global_step} with Validation Loss: {best_val_loss:.4f}")
 
         avg_train_loss = total_loss / len(train_dataloader)
         print(f"Epoch {epoch + 1} Training Loss: {avg_train_loss:.4f}")
@@ -201,20 +229,23 @@ def main():
     model_name = "meta-llama/Llama-3.2-1B"
 
     # Setup model and tokenizer
-    model, tokenizer = setup_model_and_tokenizer(model_name, bnb_config, accelerator)
+    model, tokenizer = setup_model_and_tokenizer(
+        model_name, bnb_config, accelerator)
 
     # Load data and create dataloaders
-    train_dataloader, val_dataloader = load_datasets("data_random_split.csv", label_map, tokenizer)
+    train_dataloader, val_dataloader = load_datasets(
+        "../data/data_random_split.csv", label_map, tokenizer)
 
     # Initialize optimizer and prepare with accelerator
     optimizer = AdamW(model.parameters(), lr=2e-4)
-    model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
+    model, optimizer, train_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader)
 
     # Calculate total training steps and setup the linear scheduler with warmup
     num_epochs = 3
     total_training_steps = num_epochs * len(train_dataloader)
     scheduler = get_linear_schedule_with_warmup(
-        optimizer, 
+        optimizer,
         num_warmup_steps=int(0.05 * total_training_steps),  # 10% warmup
         num_training_steps=total_training_steps
     )
