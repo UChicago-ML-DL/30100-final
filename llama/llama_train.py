@@ -161,7 +161,7 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
-        running_loss = 0
+        running_loss = []
 
         for step, batch in enumerate(tqdm(train_dataloader)):
             optimizer.zero_grad()
@@ -174,7 +174,7 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
-            running_loss += loss.item()
+            running_loss.append(loss.item())
 
             accelerator.backward(loss)
             optimizer.step()
@@ -185,10 +185,11 @@ def train_loop(model, optimizer, scheduler, train_dataloader, val_dataloader, de
 
             # Log training loss every log_steps steps
             if (step + 1) % log_steps == 0:
+                loss_val = sum(running_loss) / len(running_loss)
                 print(
-                    f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {running_loss:.4f}")
-                writer.add_scalar("Train/Step_Loss", running_loss, global_step)
-                running_loss = 0
+                    f"Epoch {epoch + 1}, Step {step + 1}/{len(train_dataloader)}, Loss: {loss_val:.4f}")
+                writer.add_scalar("Train/Step_Loss", loss_val, global_step)
+                running_loss = []
 
             # Evaluate and save best model every eval_steps steps
             if global_step % eval_steps == 0:
