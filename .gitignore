@@ -4,3 +4,6 @@ runs
 log
 best_model
 data
+
+*.code-workspace
+.DS_Store
