@@ -38,7 +38,7 @@ class TextClassificationDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        text = self.data.iloc[idx]["content"]
+        text = self.data.iloc[idx]["content_original"]
         # Convert string label to numeric using the label_map
         label = self.data.iloc[idx]["bias"]
         return {"text": text, "label": label}
@@ -71,7 +71,7 @@ def load_datasets(df_path, label_map, tokenizer):
     val_df = df[df["split"] == "valid"].sample(1024, random_state=SEED)
     val_dataset = TextClassificationDataset(val_df, label_map, tokenizer)
     train_dataloader = DataLoader(
-        train_dataset, batch_size=2, collate_fn=create_collate_fn(tokenizer))
+        train_dataset, batch_size=4, collate_fn=create_collate_fn(tokenizer))
     val_dataloader = DataLoader(
         val_dataset, batch_size=8, collate_fn=create_collate_fn(tokenizer))
     return train_dataloader, val_dataloader
@@ -103,9 +103,9 @@ def setup_model_and_tokenizer(model_name, bnb_config, accelerator):
 
     # Setup LoRA configuration for QLoRA training
     lora_config = LoraConfig(
-        r=8,
-        lora_alpha=32,
-        lora_dropout=0.05,
+        r=16,
+        lora_alpha=64,
+        lora_dropout=0.1,
         bias="none",
         target_modules=[
             "down_proj",
@@ -247,7 +247,7 @@ def main():
         model, optimizer, train_dataloader)
 
     # Calculate total training steps and setup the linear scheduler with warmup
-    num_epochs = 4
+    num_epochs = 3
     total_training_steps = num_epochs * len(train_dataloader)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -256,7 +256,7 @@ def main():
     )
 
     # Initialize TensorBoard writer
-    writer = SummaryWriter(log_dir="./runs/exp")
+    writer = SummaryWriter(log_dir="./runs/exp-r16-b4")
 
     # Run training loop with evaluation every 100 steps and logging every 10 steps
     train_loop(model,

@@ -1,0 +1,6 @@
+accelerate
+transformers
+dataset
+peft
+seaborn
+tqdm
