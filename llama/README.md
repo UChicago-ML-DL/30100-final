@@ -1,3 +1,5 @@
+# News Lens LlaMA
+
 ## Which model(s) did you use?
 
 I first evaluated the existing RoBERTa model, and then finetuned the LlaMA 3.2 1B model with QLoRA to perform the classification task hoping to capture longer input, better understand the news articles, and perform better classifications.
