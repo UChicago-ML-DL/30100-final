@@ -1,5 +1,9 @@
 # News Lens
 
+## Team
+
+Eddie Tian, Jiahang Luo, Peter Zhang
+
 ## Dataset
 
 [Article-Bias-Prediction](https://github.com/ramybaly/Article-Bias-Prediction) dataset curated by Baly et al. (2020) is used in this project. The dataset contains over 30,000 news articles labeled with bias labels: left, center, and right. The dataset is split into training, validation, and test sets.
